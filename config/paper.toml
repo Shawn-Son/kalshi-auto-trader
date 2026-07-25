@@ -1,0 +1,37 @@
+[runtime]
+environment = "paper"
+poll_interval_seconds = 5.0
+database_path = "data/trader.db"
+signal_path = "signals/example.csv"
+log_level = "INFO"
+allow_live = false
+cancel_open_orders_on_shutdown = true
+
+[universe]
+# Replace with liquid tickers you have researched. Empty means the example
+# signal file determines the universe.
+tickers = []
+
+[strategy]
+min_edge_bps = 500
+min_probability = 0.02
+max_probability = 0.98
+max_signal_age_seconds = 300
+price_improvement_cents = 1
+
+[risk]
+max_contracts_per_order = 5
+max_order_notional_cents = 250
+max_market_exposure_cents = 1000
+max_total_exposure_cents = 2500
+max_daily_loss_cents = 500
+max_open_orders = 10
+max_spread_cents = 8
+min_top_level_contracts = 2
+min_balance_cents = 1000
+cooldown_seconds = 30
+
+[paper]
+starting_balance_cents = 10000
+fee_bps = 70
+slippage_cents = 1
