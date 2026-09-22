@@ -18,7 +18,7 @@ from kalshi_trader.config import AppConfig, ConfigError, load_config
 from kalshi_trader.engine import TradingEngine
 from kalshi_trader.history import HistoryStore
 from kalshi_trader.logging import configure_logging
-from kalshi_trader.models import build_model, load_contexts, write_signals
+from kalshi_trader.models import build_model, external_tickers, load_contexts, write_signals
 from kalshi_trader.models.external import ExternalInputError
 from kalshi_trader.models.structural import implied_overround
 from kalshi_trader.signals import SignalError, load_signals
@@ -122,12 +122,15 @@ async def _collect(config: AppConfig, *, once: bool, extra_series: list[str]) ->
 async def _signal(config: AppConfig, args: argparse.Namespace) -> dict[str, object]:
     model = build_model(config.model, external_input=args.external)
     series = tuple(dict.fromkeys((*config.model.series, *args.series)))
+    tickers = tuple(
+        dict.fromkeys((*config.universe.tickers, *external_tickers(config.model, args.external)))
+    )
     client = KalshiClient(config.rest_url)
     try:
         contexts = await load_contexts(
             client,
             series=series,
-            tickers=config.universe.tickers,
+            tickers=tickers,
             max_markets=config.model.max_markets,
             depth=config.model.orderbook_depth,
         )
