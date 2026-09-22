@@ -15,7 +15,10 @@ from kalshi_trader.domain import (
     OrderIntent,
     OrderResult,
     OrderStatus,
+    OrderStyle,
+    Outcome,
     PortfolioSnapshot,
+    Position,
     dollars_to_cents_up,
     format_dollars,
 )
@@ -133,9 +136,11 @@ class KalshiClient:
             "price": format_dollars(price),
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
-            "post_only": False,
+            # A maker order must never cross; the exchange rejects it instead of filling.
+            "post_only": intent.style is OrderStyle.MAKER,
             "cancel_order_on_pause": True,
-            "reduce_only": False,
+            # A sell only ever reduces the position we hold on that side.
+            "reduce_only": not intent.is_buy,
             "subaccount": 0,
             "exchange_index": 0,
         }
@@ -172,6 +177,29 @@ class KalshiClient:
 
     async def cancel_order(self, order_id: str) -> None:
         await self._request("DELETE", f"/portfolio/events/orders/{order_id}", authenticated=True)
+
+    async def position(self, ticker: str) -> Position:
+        raw = await self._request(
+            "GET",
+            "/portfolio/positions",
+            authenticated=True,
+            params={"ticker": ticker, "limit": 100, "count_filter": "position"},
+        )
+        positions = raw.get("market_positions", [])
+        if not isinstance(positions, list):
+            raise KalshiAPIError("positions response is malformed")
+        for entry in positions:
+            if not isinstance(entry, dict) or entry.get("ticker") != ticker:
+                continue
+            # position_fp is signed: positive means long YES, negative means long NO.
+            signed = Decimal(str(entry.get("position_fp", entry.get("position", "0"))))
+            count = int(abs(signed))
+            if count == 0:
+                return Position.flat(ticker)
+            cost = dollars_to_cents_up(abs(Decimal(str(entry.get("market_exposure_dollars", "0")))))
+            outcome = Outcome.YES if signed > 0 else Outcome.NO
+            return Position(ticker=ticker, outcome=outcome, count=count, cost_cents=cost)
+        return Position.flat(ticker)
 
     async def portfolio_snapshot(self, ticker: str, state: StateStore) -> PortfolioSnapshot:
         balance_raw, positions_raw, orders_raw = await asyncio.gather(

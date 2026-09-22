@@ -31,5 +31,11 @@ cooldown_seconds = 30
 
 [paper]
 starting_balance_cents = 10000
-fee_bps = 70
 slippage_cents = 1
+
+[fees]
+# Kalshi: fee = ceil(rate * contracts * price * (1 - price)), per order.
+# 0.07 is the standard taker rate. Some series charge makers; check the
+# published schedule for each series you trade.
+taker_rate = 0.07
+maker_rate = 0.0

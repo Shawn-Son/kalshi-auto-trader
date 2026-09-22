@@ -17,6 +17,14 @@ the included example signal is deliberately non-tradable.
 - Pre-trade limits for order loss, market and portfolio exposure, daily loss, balance,
   liquidity, spread, stale signals, cooldown, and concurrent open orders.
 - Persistent kill switch and managed-order cancellation on shutdown.
+- Kalshi's real fee schedule, `ceil(rate * count * price * (1 - price))`, applied everywhere:
+  edge thresholds, paper fills, and the backtester. A flat basis-point fee understates the true
+  cost by roughly 5x at mid prices.
+- Position-aware entries (top up to target, never stack the same side) and rule-based exits
+  (sell when the bid exceeds fair value by `exit_edge_bps` after fees). A flip always closes the
+  held side before it opens the other.
+- Taker or maker order style. Maker orders rest inside the spread with `post_only` and pay the
+  maker rate; taker orders cross and pay the taker rate.
 - A chronological, fee/slippage-aware backtester with Brier score and drawdown reporting.
 - An optional C++ risk kernel with a stable C ABI and Python fallback.
 - Structured JSON logs and tests around the dangerous boundaries.
@@ -63,7 +71,26 @@ kalshi-trader status --config config/paper.toml
 ```
 
 Paper mode reads public production order books but never authenticates and never sends an order.
-Its fill model is intentionally conservative and does not model queue position.
+Taker orders fill immediately at the touch plus slippage. Maker orders rest and fill on a later
+cycle only once the far side of the book trades through the limit; queue position is not modeled,
+so paper maker fill rates are optimistic.
+
+## Order lifecycle
+
+Each polling cycle, per market:
+
+1. Reconcile resting orders (paper: fill if traded through; live: refresh from the exchange).
+2. Read the current net position.
+3. Exit check: if we hold a side and its best bid minus fee exceeds fair value by
+   `strategy.exit_edge_bps`, sell up to `risk.max_contracts_per_order` of it. Nothing else
+   happens this cycle.
+4. Entry check: pick the side whose entry price (taker: ask, maker: bid + improvement) sits below
+   fair value by `strategy.min_edge_bps` after fees. Buy only the difference between the target
+   count and what is already held. Never open a side while the opposite side is held.
+5. Risk checks, journal, submit.
+
+Sells bypass exposure, balance, and cooldown limits because they release exposure; they are still
+blocked by the kill switch, closed markets, oversized counts, and are sent `reduce_only`.
 
 ## Signal contract
 
@@ -100,8 +127,9 @@ kalshi-trader backtest data/history.csv \
   --output outputs/backtest.json
 ```
 
-The configured fee is an approximation. Before relying on results, implement the exact fee
-schedule for each traded series and use point-in-time order-book data—not final or revised data.
+The backtester models taker entries with the configured `fees.taker_rate`, slippage, and hold to
+settlement. Confirm the rate for each series you trade against Kalshi's published schedule, and use
+point-in-time order-book data—not final or revised data.
 
 ## Demo trading
 

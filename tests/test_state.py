@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
 
-from kalshi_trader.domain import OrderResult, OrderStatus
+from kalshi_trader.domain import OrderAction, OrderResult, OrderStatus, Outcome
 from kalshi_trader.state import StateError, StateStore
 
 
@@ -42,4 +43,35 @@ def test_paper_fill_is_cash_constrained(tmp_path, intent) -> None:
     with pytest.raises(StateError, match="insufficient cash"):
         store.apply_paper_fill(intent, fill_price=Decimal("0.51"), fee_cents=1)
     assert store.paper_account()[0] == 10
+    store.close()
+
+
+def test_paper_sell_realizes_pnl_and_reduces_position(tmp_path, intent) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.initialize_paper(10_000)
+    store.apply_paper_fill(intent, fill_price=Decimal("0.50"), fee_cents=2)
+    assert store.paper_position("TEST").count == 2
+    assert store.paper_account() == (10_000 - 102, 0)
+    sell = replace(intent, client_order_id="client-2", action=OrderAction.SELL)
+    store.apply_paper_sell(sell, fill_price=Decimal("0.60"), fee_cents=2)
+    assert store.paper_position("TEST").is_flat
+    # proceeds 120 - 2 fee = 118; cost basis released 102; realized +16
+    assert store.paper_account() == (10_000 - 102 + 118, 16)
+    store.close()
+
+
+def test_paper_sell_cannot_exceed_position(tmp_path, intent) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.initialize_paper(10_000)
+    sell = replace(intent, action=OrderAction.SELL, outcome=Outcome.NO)
+    with pytest.raises(StateError, match="paper position holds 0"):
+        store.apply_paper_sell(sell, fill_price=Decimal("0.60"), fee_cents=0)
+    store.close()
+
+
+def test_action_and_style_round_trip(tmp_path, intent) -> None:
+    store = StateStore(tmp_path / "state.db")
+    sell = replace(intent, action=OrderAction.SELL)
+    store.record_intent(sell)
+    assert store.order_intents() == [sell]
     store.close()

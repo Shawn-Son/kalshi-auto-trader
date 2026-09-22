@@ -14,6 +14,16 @@ class Outcome(StrEnum):
     NO = "no"
 
 
+class OrderAction(StrEnum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderStyle(StrEnum):
+    TAKER = "taker"
+    MAKER = "maker"
+
+
 class OrderStatus(StrEnum):
     PENDING = "pending"
     RESTING = "resting"
@@ -33,6 +43,27 @@ class Signal:
     def age_seconds(self, now: datetime | None = None) -> float:
         current = now or datetime.now(UTC)
         return (current - self.generated_at).total_seconds()
+
+
+@dataclass(frozen=True)
+class Position:
+    """Net contracts held in one market. At most one side is non-zero."""
+
+    ticker: str
+    outcome: Outcome | None
+    count: int
+    cost_cents: int = 0
+
+    @property
+    def is_flat(self) -> bool:
+        return self.outcome is None or self.count <= 0
+
+    def held(self, outcome: Outcome) -> int:
+        return self.count if self.outcome is outcome and self.count > 0 else 0
+
+    @staticmethod
+    def flat(ticker: str) -> Position:
+        return Position(ticker=ticker, outcome=None, count=0)
 
 
 @dataclass(frozen=True)
@@ -72,22 +103,40 @@ class OrderIntent:
     fair_probability: Decimal
     signal_generated_at: datetime
     model_version: str
+    action: OrderAction = OrderAction.BUY
+    style: OrderStyle = OrderStyle.TAKER
+
+    @property
+    def is_buy(self) -> bool:
+        return self.action is OrderAction.BUY
 
     @property
     def max_loss_cents(self) -> int:
+        """Worst-case cash at risk. A sell releases exposure, so it risks nothing new."""
+        if not self.is_buy:
+            return 0
         return dollars_to_cents_up(self.limit_price * self.count)
 
     @property
+    def outcome_probability(self) -> Decimal:
+        return self.fair_probability if self.outcome is Outcome.YES else ONE - self.fair_probability
+
+    @property
     def edge_bps(self) -> int:
-        probability = (
-            self.fair_probability if self.outcome is Outcome.YES else ONE - self.fair_probability
-        )
-        return int((probability - self.limit_price) * 10_000)
+        """Gross edge before fees: fair value minus price for buys, price minus fair for sells."""
+        if self.is_buy:
+            return int((self.outcome_probability - self.limit_price) * 10_000)
+        return int((self.limit_price - self.outcome_probability) * 10_000)
 
     def api_book_side_and_price(self) -> tuple[str, Decimal]:
-        if self.outcome is Outcome.YES:
-            return "bid", self.limit_price
-        return "ask", ONE - self.limit_price
+        """Map to Kalshi's single YES book: every order is a YES bid or a YES ask.
+
+        Buying YES / selling NO adds a YES bid. Selling YES / buying NO adds a YES ask.
+        NO prices are quoted as 1 - YES price.
+        """
+        yes_terms = self.limit_price if self.outcome is Outcome.YES else ONE - self.limit_price
+        buys_yes = (self.outcome is Outcome.YES) == self.is_buy
+        return ("bid" if buys_yes else "ask"), yes_terms
 
 
 @dataclass(frozen=True)

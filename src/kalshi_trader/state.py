@@ -5,10 +5,18 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 
-from kalshi_trader.domain import OrderIntent, OrderResult, OrderStatus, Outcome
+from kalshi_trader.domain import (
+    OrderAction,
+    OrderIntent,
+    OrderResult,
+    OrderStatus,
+    OrderStyle,
+    Outcome,
+    Position,
+)
 
 
 class StateError(RuntimeError):
@@ -74,8 +82,18 @@ class StateStore:
             );
             """
         )
+        self._add_column_if_missing("orders", "action", "TEXT NOT NULL DEFAULT 'buy'")
+        self._add_column_if_missing("orders", "style", "TEXT NOT NULL DEFAULT 'taker'")
         if self.get_control("kill_switch") is None:
             self.set_control("kill_switch", "false")
+
+    def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -99,8 +117,8 @@ class StateStore:
                 INSERT INTO orders (
                     client_order_id, ticker, outcome, count, limit_price,
                     max_loss_cents, fair_probability, model_version,
-                    signal_generated_at, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    signal_generated_at, status, action, style, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     intent.client_order_id,
@@ -113,6 +131,8 @@ class StateStore:
                     intent.model_version,
                     intent.signal_generated_at.isoformat(),
                     OrderStatus.PENDING.value,
+                    intent.action.value,
+                    intent.style.value,
                     now,
                     now,
                 ),
@@ -246,6 +266,75 @@ class StateStore:
                 (intent.ticker, intent.outcome.value, intent.count, cost_cents),
             )
 
+    def apply_paper_sell(self, intent: OrderIntent, *, fill_price: Decimal, fee_cents: int) -> None:
+        """Close part of a paper position and realize its profit or loss."""
+        proceeds_cents = (
+            int((fill_price * intent.count * 100).quantize(Decimal("1"), rounding=ROUND_FLOOR))
+            - fee_cents
+        )
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT count, cost_cents FROM paper_positions WHERE ticker = ? AND outcome = ?",
+                (intent.ticker, intent.outcome.value),
+            ).fetchone()
+            held = int(row["count"]) if row else 0
+            if held < intent.count:
+                raise StateError(
+                    f"cannot sell {intent.count} {intent.outcome.value} on {intent.ticker}; "
+                    f"paper position holds {held}"
+                )
+            cost_cents = int(row["cost_cents"])
+            released_cost = cost_cents * intent.count // held
+            realized = proceeds_cents - released_cost
+            remaining = held - intent.count
+            if remaining == 0:
+                self._connection.execute(
+                    "DELETE FROM paper_positions WHERE ticker = ? AND outcome = ?",
+                    (intent.ticker, intent.outcome.value),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    UPDATE paper_positions SET count = ?, cost_cents = ?
+                    WHERE ticker = ? AND outcome = ?
+                    """,
+                    (remaining, cost_cents - released_cost, intent.ticker, intent.outcome.value),
+                )
+            self._connection.execute(
+                """
+                UPDATE paper_account
+                SET balance_cents = balance_cents + ?,
+                    realized_pnl_cents = realized_pnl_cents + ?
+                WHERE singleton = 1
+                """,
+                (proceeds_cents, realized),
+            )
+
+    def paper_position(self, ticker: str) -> Position:
+        rows = self._connection.execute(
+            "SELECT outcome, count, cost_cents FROM paper_positions WHERE ticker = ? AND count > 0",
+            (ticker,),
+        ).fetchall()
+        if not rows:
+            return Position.flat(ticker)
+        # A paper account never holds both sides: a sell closes before the other side opens.
+        row = max(rows, key=lambda item: int(item["count"]))
+        return Position(
+            ticker=ticker,
+            outcome=Outcome(row["outcome"]),
+            count=int(row["count"]),
+            cost_cents=int(row["cost_cents"]),
+        )
+
+    def resting_intents(self, ticker: str | None = None) -> list[OrderIntent]:
+        query = "SELECT * FROM orders WHERE status = ?"
+        params: tuple[object, ...] = (OrderStatus.RESTING.value,)
+        if ticker is not None:
+            query += " AND ticker = ?"
+            params = (*params, ticker)
+        rows = self._connection.execute(query + " ORDER BY created_at", params).fetchall()
+        return [_row_to_intent(row) for row in rows]
+
     def paper_exposure(self, ticker: str | None = None) -> int:
         if ticker is None:
             row = self._connection.execute(
@@ -298,16 +387,19 @@ class StateStore:
 
     def order_intents(self) -> list[OrderIntent]:
         rows = self._connection.execute("SELECT * FROM orders ORDER BY created_at").fetchall()
-        return [
-            OrderIntent(
-                client_order_id=row["client_order_id"],
-                ticker=row["ticker"],
-                outcome=Outcome(row["outcome"]),
-                count=int(row["count"]),
-                limit_price=Decimal(row["limit_price"]),
-                fair_probability=Decimal(row["fair_probability"]),
-                signal_generated_at=datetime.fromisoformat(row["signal_generated_at"]),
-                model_version=row["model_version"],
-            )
-            for row in rows
-        ]
+        return [_row_to_intent(row) for row in rows]
+
+
+def _row_to_intent(row: sqlite3.Row) -> OrderIntent:
+    return OrderIntent(
+        client_order_id=row["client_order_id"],
+        ticker=row["ticker"],
+        outcome=Outcome(row["outcome"]),
+        count=int(row["count"]),
+        limit_price=Decimal(row["limit_price"]),
+        fair_probability=Decimal(row["fair_probability"]),
+        signal_generated_at=datetime.fromisoformat(row["signal_generated_at"]),
+        model_version=row["model_version"],
+        action=OrderAction(row["action"]),
+        style=OrderStyle(row["style"]),
+    )

@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal, TypeVar, cast
+
+from kalshi_trader.domain import OrderStyle
 
 Environment = Literal["paper", "demo", "live"]
 
@@ -36,6 +39,8 @@ class StrategyConfig:
     max_probability: float
     max_signal_age_seconds: int
     price_improvement_cents: int
+    order_style: OrderStyle = OrderStyle.TAKER
+    exit_edge_bps: int = 200
 
 
 @dataclass(frozen=True)
@@ -53,9 +58,19 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class FeeConfig:
+    """Kalshi fee rates. fee = ceil(rate * count * price * (1 - price)) per order."""
+
+    taker_rate: Decimal
+    maker_rate: Decimal
+
+    def rate_for(self, style: OrderStyle) -> Decimal:
+        return self.maker_rate if style is OrderStyle.MAKER else self.taker_rate
+
+
+@dataclass(frozen=True)
 class PaperConfig:
     starting_balance_cents: int
-    fee_bps: int
     slippage_cents: int
 
 
@@ -72,6 +87,7 @@ class AppConfig:
     strategy: StrategyConfig
     risk: RiskConfig
     paper: PaperConfig
+    fees: FeeConfig
 
     @property
     def rest_url(self) -> str:
@@ -161,6 +177,7 @@ def load_config(path: Path) -> AppConfig:
     strat = _table(raw, "strategy")
     risk = _table(raw, "risk")
     paper = _table(raw, "paper")
+    fees = _table(raw, "fees")
 
     environment = _required(rt, "environment", str)
     if environment not in {"paper", "demo", "live"}:
@@ -175,12 +192,17 @@ def load_config(path: Path) -> AppConfig:
         cancel_open_orders_on_shutdown=_required(rt, "cancel_open_orders_on_shutdown", bool),
     )
     universe = UniverseConfig(_strings(univ, "tickers"))
+    order_style_raw = strat.get("order_style", "taker")
+    if order_style_raw not in {"taker", "maker"}:
+        raise ConfigError("strategy.order_style must be taker or maker")
     strategy = StrategyConfig(
         min_edge_bps=_integer(strat, "min_edge_bps"),
         min_probability=_number(strat, "min_probability"),
         max_probability=_number(strat, "max_probability"),
         max_signal_age_seconds=_integer(strat, "max_signal_age_seconds"),
         price_improvement_cents=_integer(strat, "price_improvement_cents"),
+        order_style=OrderStyle(order_style_raw),
+        exit_edge_bps=_integer(strat, "exit_edge_bps") if "exit_edge_bps" in strat else 200,
     )
     risk_config = RiskConfig(
         max_contracts_per_order=_integer(risk, "max_contracts_per_order"),
@@ -196,8 +218,11 @@ def load_config(path: Path) -> AppConfig:
     )
     paper_config = PaperConfig(
         starting_balance_cents=_integer(paper, "starting_balance_cents"),
-        fee_bps=_integer(paper, "fee_bps"),
         slippage_cents=_integer(paper, "slippage_cents"),
+    )
+    fee_config = FeeConfig(
+        taker_rate=Decimal(str(_number(fees, "taker_rate"))),
+        maker_rate=Decimal(str(_number(fees, "maker_rate"))),
     )
 
     for name, value in (
@@ -216,17 +241,21 @@ def load_config(path: Path) -> AppConfig:
         _positive(name, value)
     for name, value in (
         ("strategy.price_improvement_cents", strategy.price_improvement_cents),
+        ("strategy.exit_edge_bps", strategy.exit_edge_bps),
         ("risk.max_spread_cents", risk_config.max_spread_cents),
         ("risk.min_top_level_contracts", risk_config.min_top_level_contracts),
         ("risk.cooldown_seconds", risk_config.cooldown_seconds),
-        ("paper.fee_bps", paper_config.fee_bps),
         ("paper.slippage_cents", paper_config.slippage_cents),
+        ("fees.taker_rate", float(fee_config.taker_rate)),
+        ("fees.maker_rate", float(fee_config.maker_rate)),
     ):
         _positive(name, value, zero_ok=True)
+    if fee_config.taker_rate >= 1 or fee_config.maker_rate >= 1:
+        raise ConfigError("fee rates are fractions of notional and must be below 1")
     if not 0 < strategy.min_probability < strategy.max_probability < 1:
         raise ConfigError("strategy probability bounds must satisfy 0 < min < max < 1")
     if risk_config.max_order_notional_cents > risk_config.max_market_exposure_cents:
         raise ConfigError("max order notional cannot exceed max market exposure")
     if risk_config.max_market_exposure_cents > risk_config.max_total_exposure_cents:
         raise ConfigError("max market exposure cannot exceed max total exposure")
-    return AppConfig(runtime, universe, strategy, risk_config, paper_config)
+    return AppConfig(runtime, universe, strategy, risk_config, paper_config, fee_config)

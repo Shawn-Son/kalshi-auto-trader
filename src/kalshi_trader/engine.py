@@ -28,7 +28,7 @@ class TradingEngine:
         self.config = config
         self.broker = broker
         self.state = state
-        self.strategy = ProbabilityMispricingStrategy(config.strategy)
+        self.strategy = ProbabilityMispricingStrategy(config.strategy, config.fees)
         self.risk = RiskEngine(config.risk, config.strategy)
         self._stop = asyncio.Event()
 
@@ -75,12 +75,20 @@ class TradingEngine:
         started = time.perf_counter()
         try:
             quote = await self.broker.quote(ticker)
+            await self.broker.reconcile(ticker, quote)
+            position = await self.broker.position(ticker)
             ask_cents = max(1, dollars_to_cents(max(quote.yes_ask, quote.no_ask)))
             count = min(
                 self.config.risk.max_contracts_per_order,
                 max(1, self.config.risk.max_order_notional_cents // ask_cents),
             )
-            decision = self.strategy.evaluate(signal, quote, count=count)
+            decision = self.strategy.evaluate(
+                signal,
+                quote,
+                count=count,
+                position=position,
+                max_order_count=self.config.risk.max_contracts_per_order,
+            )
             if decision.intent is None:
                 logger.info(
                     "no trade",
@@ -129,6 +137,7 @@ class TradingEngine:
                     "ticker": ticker,
                     "client_order_id": intent.client_order_id,
                     "order_id": result.order_id,
+                    "action": intent.action.value,
                     "decision": result.status.value,
                     "reason": decision.reason,
                     "latency_ms": round((time.perf_counter() - started) * 1000, 2),

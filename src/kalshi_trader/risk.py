@@ -37,6 +37,8 @@ class RiskEngine:
         now: datetime | None = None,
     ) -> RiskDecision:
         current = now or datetime.now(UTC)
+        if not intent.is_buy:
+            return self._evaluate_sell(intent, quote, kill_switch=kill_switch)
         numeric_code = self.fastcore.validate(
             NumericRisk(
                 count=intent.count,
@@ -103,3 +105,31 @@ class RiskEngine:
             if elapsed < self.risk.cooldown_seconds:
                 return RiskDecision(False, "COOLDOWN", "market cooldown is active")
         return RiskDecision(True, "APPROVED", "all pre-trade checks passed")
+
+    def _evaluate_sell(
+        self, intent: OrderIntent, quote: MarketQuote, *, kill_switch: bool
+    ) -> RiskDecision:
+        """A sell only releases exposure, so exposure, balance and cooldown do not apply.
+
+        It is still blocked by the kill switch, a closed market, an oversized count,
+        and a nonsensical price, and it must actually be a reduce of a held position;
+        the exchange enforces the last point through reduce_only.
+        """
+        checks: tuple[tuple[bool, str, str], ...] = (
+            (not kill_switch, "KILL_SWITCH", "kill switch is active"),
+            (quote.status == "open", "MARKET_CLOSED", f"market status is {quote.status}"),
+            (
+                0 < intent.count <= self.risk.max_contracts_per_order,
+                "ORDER_COUNT",
+                "contract count exceeds per-order limit",
+            ),
+            (
+                intent.limit_price > 0 and intent.limit_price < 1,
+                "PRICE",
+                "limit price must be strictly between zero and one",
+            ),
+        )
+        for passed, code, reason in checks:
+            if not passed:
+                return RiskDecision(False, code, reason)
+        return RiskDecision(True, "APPROVED", "sell reduces exposure; basic checks passed")

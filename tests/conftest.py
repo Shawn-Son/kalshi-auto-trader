@@ -7,6 +7,7 @@ import pytest
 
 from kalshi_trader.config import (
     AppConfig,
+    FeeConfig,
     PaperConfig,
     RiskConfig,
     RuntimeConfig,
@@ -48,7 +49,8 @@ def app_config(tmp_path) -> AppConfig:
             min_balance_cents=1000,
             cooldown_seconds=30,
         ),
-        paper=PaperConfig(starting_balance_cents=10_000, fee_bps=70, slippage_cents=1),
+        paper=PaperConfig(starting_balance_cents=10_000, slippage_cents=1),
+        fees=FeeConfig(taker_rate=Decimal("0.07"), maker_rate=Decimal("0")),
     )
 
 

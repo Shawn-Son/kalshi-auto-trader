@@ -9,6 +9,7 @@ from pathlib import Path
 
 from kalshi_trader.config import AppConfig
 from kalshi_trader.domain import ONE, Outcome, parse_utc
+from kalshi_trader.fees import fee_per_contract, order_fee_cents
 
 
 class BacktestError(ValueError):
@@ -92,22 +93,27 @@ def run_backtest(config: AppConfig, rows: list[BacktestRow]) -> BacktestReport:
     brier_total = Decimal("0")
     evaluated = 0
     traded_tickers: set[str] = set()
+    # The backtester models taker entries: it lifts the ask, pays slippage and the
+    # taker fee, and holds to settlement. Maker fills need queue data it does not have.
+    fee_rate = config.fees.taker_rate
     for row in rows:
         actual = Decimal("1") if row.result is Outcome.YES else Decimal("0")
         brier_total += (row.fair_probability - actual) ** 2
         evaluated += 1
         if row.ticker in traded_tickers:
             continue
-        yes_edge = row.fair_probability - row.yes_ask
-        no_edge = (ONE - row.fair_probability) - row.no_ask
+        slip = Decimal(config.paper.slippage_cents) / 100
+        yes_price = row.yes_ask + slip
+        no_price = row.no_ask + slip
+        yes_edge = row.fair_probability - yes_price - fee_per_contract(yes_price, fee_rate)
+        no_edge = (ONE - row.fair_probability) - no_price - fee_per_contract(no_price, fee_rate)
         outcome, price, edge = (
-            (Outcome.YES, row.yes_ask, yes_edge)
+            (Outcome.YES, yes_price, yes_edge)
             if yes_edge >= no_edge
-            else (Outcome.NO, row.no_ask, no_edge)
+            else (Outcome.NO, no_price, no_edge)
         )
         if int(edge * 10_000) < config.strategy.min_edge_bps:
             continue
-        price += Decimal(config.paper.slippage_cents) / 100
         if not 0 < price < 1:
             continue
         per_contract_cents = max(1, int((price * 100).to_integral_value()))
@@ -118,12 +124,10 @@ def run_backtest(config: AppConfig, rows: list[BacktestRow]) -> BacktestReport:
         )
         if count <= 0:
             continue
-        fee_dollars = (price * count * Decimal(config.paper.fee_bps) / 10_000).quantize(
-            Decimal("0.01"), rounding=ROUND_CEILING
+        fee_cents = order_fee_cents(count, price, fee_rate)
+        cost_cents = (
+            int((price * count * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)) + fee_cents
         )
-        cost_cents = int(
-            (price * count * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
-        ) + int(fee_dollars * 100)
         payout_cents = count * 100 if outcome is row.result else 0
         balance += payout_cents - cost_cents
         trades += 1

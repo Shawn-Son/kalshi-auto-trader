@@ -47,7 +47,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _broker(config: AppConfig, state: StateStore) -> PaperBroker | KalshiBroker:
     if config.runtime.environment == "paper":
-        return PaperBroker(KalshiClient(config.rest_url), state, config.paper)
+        return PaperBroker(KalshiClient(config.rest_url), state, config.paper, config.fees)
     credentials = config.credentials()
     signer = RequestSigner(credentials.api_key_id, credentials.private_key_path)
     return KalshiBroker(KalshiClient(config.rest_url, signer=signer), state)
