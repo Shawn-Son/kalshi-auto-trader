@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -20,6 +21,9 @@ from kalshi_trader.fees import fee_per_contract
 
 MAX_PRICE = Decimal("0.99")
 MIN_PRICE = CENT
+
+
+Sizer = Callable[[Outcome, Decimal], int]
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class ProbabilityMispricingStrategy:
         count: int,
         position: Position | None = None,
         max_order_count: int | None = None,
+        sizer: Sizer | None = None,
     ) -> StrategyDecision:
         held = position or Position.flat(quote.ticker)
         if signal.ticker != quote.ticker:
@@ -73,7 +78,7 @@ class ProbabilityMispricingStrategy:
         exit_decision = self._exit(signal, quote, held, max_order_count)
         if exit_decision is not None:
             return exit_decision
-        return self._entry(signal, quote, count=count, held=held)
+        return self._entry(signal, quote, count=count, held=held, sizer=sizer)
 
     # -- exits ---------------------------------------------------------------
 
@@ -105,7 +110,13 @@ class ProbabilityMispricingStrategy:
     # -- entries -------------------------------------------------------------
 
     def _entry(
-        self, signal: Signal, quote: MarketQuote, *, count: int, held: Position
+        self,
+        signal: Signal,
+        quote: MarketQuote,
+        *,
+        count: int,
+        held: Position,
+        sizer: Sizer | None,
     ) -> StrategyDecision:
         rate = self.fees.rate_for(self.config.order_style)
         best: tuple[Outcome, Decimal, int] | None = None
@@ -128,10 +139,15 @@ class ProbabilityMispricingStrategy:
             return StrategyDecision(
                 None, f"holding {opposite.value}; will not open {outcome.value} until exited"
             )
-        remaining = count - held.held(outcome)
+        target = sizer(outcome, price) if sizer is not None else count
+        if target <= 0:
+            return StrategyDecision(
+                None, f"{outcome.value} edge {net_edge_bps}bps but sized to zero"
+            )
+        remaining = target - held.held(outcome)
         if remaining <= 0:
             return StrategyDecision(
-                None, f"already holding {held.held(outcome)} {outcome.value} (target {count})"
+                None, f"already holding {held.held(outcome)} {outcome.value} (target {target})"
             )
         intent = self._intent(signal, outcome, remaining, price, action=OrderAction.BUY)
         return StrategyDecision(

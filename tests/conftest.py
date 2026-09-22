@@ -17,6 +17,7 @@ from kalshi_trader.config import (
     UniverseConfig,
 )
 from kalshi_trader.domain import MarketQuote, OrderIntent, Outcome, PortfolioSnapshot
+from kalshi_trader.sizing import SizingConfig
 
 
 @pytest.fixture
@@ -71,6 +72,12 @@ def app_config(tmp_path) -> AppConfig:
             calibration_path=None,
             orderbook_depth=1,
             max_markets=50,
+        ),
+        sizing=SizingConfig(
+            kelly_fraction=0.25,
+            max_bankroll_fraction=0.05,
+            min_annualized_return=0.0,
+            default_days_to_resolution=7.0,
         ),
     )
 

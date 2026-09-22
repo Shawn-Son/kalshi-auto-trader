@@ -10,6 +10,7 @@ from pathlib import Path
 from kalshi_trader.config import AppConfig
 from kalshi_trader.domain import ONE, Outcome, parse_utc
 from kalshi_trader.fees import fee_per_contract, order_fee_cents
+from kalshi_trader.sizing import cap_by_risk, size_position
 
 
 class BacktestError(ValueError):
@@ -24,6 +25,7 @@ class BacktestRow:
     yes_ask: Decimal
     no_ask: Decimal
     result: Outcome
+    close_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class BacktestReport:
     wins: int
     win_rate: float
     brier_score: float
+    skipped_by_sizing: int = 0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
@@ -58,8 +61,11 @@ def load_backtest_rows(path: Path) -> list[BacktestRow]:
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
                 raise BacktestError(f"dataset must contain: {', '.join(sorted(required))}")
             for line, raw in enumerate(reader, start=2):
+                if not raw.get("fair_probability", "").strip() or not raw.get("result", "").strip():
+                    continue  # collector rows without a signal or an outcome are not tradable
                 try:
                     outcome = Outcome(raw["result"].strip().lower())
+                    close_raw = (raw.get("close_time") or "").strip()
                     row = BacktestRow(
                         ticker=raw["ticker"].strip(),
                         observed_at=parse_utc(raw["observed_at"]),
@@ -67,6 +73,7 @@ def load_backtest_rows(path: Path) -> list[BacktestRow]:
                         yes_ask=Decimal(raw["yes_ask"]),
                         no_ask=Decimal(raw["no_ask"]),
                         result=outcome,
+                        close_time=parse_utc(close_raw) if close_raw else None,
                     )
                 except (KeyError, ValueError) as exc:
                     raise BacktestError(f"{path}:{line}: invalid row: {exc}") from exc
@@ -92,6 +99,7 @@ def run_backtest(config: AppConfig, rows: list[BacktestRow]) -> BacktestReport:
     wins = 0
     brier_total = Decimal("0")
     evaluated = 0
+    skipped_by_sizing = 0
     traded_tickers: set[str] = set()
     # The backtester models taker entries: it lifts the ask, pays slippage and the
     # taker fee, and holds to settlement. Maker fills need queue data it does not have.
@@ -116,13 +124,28 @@ def run_backtest(config: AppConfig, rows: list[BacktestRow]) -> BacktestReport:
             continue
         if not 0 < price < 1:
             continue
+        fair = row.fair_probability if outcome is Outcome.YES else ONE - row.fair_probability
+        seconds_to_close = (
+            (row.close_time - row.observed_at).total_seconds() if row.close_time else None
+        )
+        sized = size_position(
+            fair=fair,
+            price=price,
+            fee_rate=fee_rate,
+            bankroll_cents=balance,
+            config=config.sizing,
+            seconds_to_close=seconds_to_close,
+        )
         per_contract_cents = max(1, int((price * 100).to_integral_value()))
-        count = min(
-            config.risk.max_contracts_per_order,
-            config.risk.max_order_notional_cents // per_contract_cents,
-            balance // per_contract_cents,
+        count = cap_by_risk(
+            min(sized.contracts, balance // per_contract_cents),
+            price=price,
+            max_contracts_per_order=config.risk.max_contracts_per_order,
+            max_order_notional_cents=config.risk.max_order_notional_cents,
+            exposure_room_cents=config.risk.max_market_exposure_cents,
         )
         if count <= 0:
+            skipped_by_sizing += 1
             continue
         fee_cents = order_fee_cents(count, price, fee_rate)
         cost_cents = (
@@ -147,4 +170,5 @@ def run_backtest(config: AppConfig, rows: list[BacktestRow]) -> BacktestReport:
         wins=wins,
         win_rate=wins / trades if trades else 0.0,
         brier_score=float(brier_total / evaluated) if evaluated else 0.0,
+        skipped_by_sizing=skipped_by_sizing,
     )

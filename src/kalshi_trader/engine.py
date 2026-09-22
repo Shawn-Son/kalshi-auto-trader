@@ -3,15 +3,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from decimal import Decimal
 
 from kalshi_trader.api import KalshiAPIError
 from kalshi_trader.broker import Broker
 from kalshi_trader.config import AppConfig
-from kalshi_trader.domain import OrderResult, OrderStatus, Signal, dollars_to_cents
+from kalshi_trader.domain import (
+    MarketQuote,
+    OrderResult,
+    OrderStatus,
+    Outcome,
+    PortfolioSnapshot,
+    Signal,
+)
 from kalshi_trader.risk import RiskEngine
 from kalshi_trader.signals import SignalError, load_signals
+from kalshi_trader.sizing import cap_by_risk, size_position
 from kalshi_trader.state import StateStore
 from kalshi_trader.strategy import ProbabilityMispricingStrategy
 
@@ -77,17 +86,14 @@ class TradingEngine:
             quote = await self.broker.quote(ticker)
             await self.broker.reconcile(ticker, quote)
             position = await self.broker.position(ticker)
-            ask_cents = max(1, dollars_to_cents(max(quote.yes_ask, quote.no_ask)))
-            count = min(
-                self.config.risk.max_contracts_per_order,
-                max(1, self.config.risk.max_order_notional_cents // ask_cents),
-            )
+            portfolio = await self.broker.snapshot(ticker)
             decision = self.strategy.evaluate(
                 signal,
                 quote,
-                count=count,
+                count=self.config.risk.max_contracts_per_order,
                 position=position,
                 max_order_count=self.config.risk.max_contracts_per_order,
+                sizer=self._sizer(signal, quote, portfolio),
             )
             if decision.intent is None:
                 logger.info(
@@ -96,7 +102,6 @@ class TradingEngine:
                 )
                 return
             intent = decision.intent
-            portfolio = await self.broker.snapshot(ticker)
             last_order_at = self.state.last_order_at(ticker)
             self.state.record_intent(intent)
             risk = self.risk.evaluate(
@@ -151,6 +156,48 @@ class TradingEngine:
                     "latency_ms": round((time.perf_counter() - started) * 1000, 2),
                 },
             )
+
+    def _sizer(
+        self, signal: Signal, quote: MarketQuote, portfolio: PortfolioSnapshot
+    ) -> Callable[[Outcome, Decimal], int]:
+        """Target contracts for a side at a price: fractional Kelly, then risk caps."""
+        risk = self.config.risk
+        fee_rate = self.config.fees.rate_for(self.config.strategy.order_style)
+
+        def target(outcome: Outcome, price: Decimal) -> int:
+            fair = (
+                signal.fair_probability if outcome is Outcome.YES else 1 - signal.fair_probability
+            )
+            decision = size_position(
+                fair=fair,
+                price=price,
+                fee_rate=fee_rate,
+                bankroll_cents=portfolio.balance_cents,
+                config=self.config.sizing,
+                seconds_to_close=quote.seconds_to_close(),
+            )
+            capped = cap_by_risk(
+                decision.contracts,
+                price=price,
+                max_contracts_per_order=risk.max_contracts_per_order,
+                max_order_notional_cents=risk.max_order_notional_cents,
+                exposure_room_cents=risk.max_market_exposure_cents
+                - portfolio.market_exposure_cents,
+            )
+            logger.debug(
+                "sizing",
+                extra={
+                    "ticker": quote.ticker,
+                    "decision": outcome.value,
+                    "reason": decision.reason,
+                    "kelly_contracts": decision.contracts,
+                    "capped_contracts": capped,
+                    "annualized_return": f"{decision.annualized_return:.3f}",
+                },
+            )
+            return capped
+
+        return target
 
     async def cancel_managed_orders(self) -> None:
         for order_id in self.state.resting_order_ids():

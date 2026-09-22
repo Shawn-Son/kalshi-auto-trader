@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal, TypeVar, cast
 
 from kalshi_trader.domain import OrderStyle
+from kalshi_trader.sizing import SizingConfig
 
 Environment = Literal["paper", "demo", "live"]
 
@@ -115,6 +116,7 @@ class AppConfig:
     fees: FeeConfig
     collector: CollectorConfig
     model: ModelConfig
+    sizing: SizingConfig
 
     @property
     def rest_url(self) -> str:
@@ -209,6 +211,8 @@ def load_config(path: Path) -> AppConfig:
     collector = cast(dict[str, object], collector_raw) if isinstance(collector_raw, dict) else {}
     model_raw = raw.get("model")
     model = cast(dict[str, object], model_raw) if isinstance(model_raw, dict) else {}
+    sizing_raw = raw.get("sizing")
+    sizing = cast(dict[str, object], sizing_raw) if isinstance(sizing_raw, dict) else {}
 
     environment = _required(rt, "environment", str)
     if environment not in {"paper", "demo", "live"}:
@@ -284,6 +288,21 @@ def load_config(path: Path) -> AppConfig:
         max_markets=_integer(model, "max_markets") if "max_markets" in model else 200,
     )
 
+    sizing_config = SizingConfig(
+        kelly_fraction=_number(sizing, "kelly_fraction") if "kelly_fraction" in sizing else 0.25,
+        max_bankroll_fraction=(
+            _number(sizing, "max_bankroll_fraction") if "max_bankroll_fraction" in sizing else 0.05
+        ),
+        min_annualized_return=(
+            _number(sizing, "min_annualized_return") if "min_annualized_return" in sizing else 0.0
+        ),
+        default_days_to_resolution=(
+            _number(sizing, "default_days_to_resolution")
+            if "default_days_to_resolution" in sizing
+            else 7.0
+        ),
+    )
+
     for name, value in (
         ("runtime.poll_interval_seconds", runtime.poll_interval_seconds),
         ("strategy.min_edge_bps", strategy.min_edge_bps),
@@ -314,8 +333,15 @@ def load_config(path: Path) -> AppConfig:
         ("model.structural_weight", model_config.structural_weight),
         ("model.external_weight", model_config.external_weight),
         ("model.market_weight", model_config.market_weight),
+        ("sizing.min_annualized_return", sizing_config.min_annualized_return),
     ):
         _positive(name, value, zero_ok=True)
+    if not 0 < sizing_config.kelly_fraction <= 1:
+        raise ConfigError("sizing.kelly_fraction must be in (0, 1]")
+    if not 0 < sizing_config.max_bankroll_fraction <= 1:
+        raise ConfigError("sizing.max_bankroll_fraction must be in (0, 1]")
+    if sizing_config.default_days_to_resolution <= 0:
+        raise ConfigError("sizing.default_days_to_resolution must be positive")
     if not 0 < model_config.shrink_to_source <= 1:
         raise ConfigError("model.shrink_to_source must be in (0, 1]")
     if fee_config.taker_rate >= 1 or fee_config.maker_rate >= 1:
@@ -335,4 +361,5 @@ def load_config(path: Path) -> AppConfig:
         fee_config,
         collector_config,
         model_config,
+        sizing_config,
     )

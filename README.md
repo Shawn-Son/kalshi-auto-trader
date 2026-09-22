@@ -25,6 +25,8 @@ the included example signal is deliberately non-tradable.
   held side before it opens the other.
 - Taker or maker order style. Maker orders rest inside the spread with `post_only` and pay the
   maker rate; taker orders cross and pay the taker rate.
+- Fractional Kelly sizing on fee-adjusted prices with a per-market bankroll cap and an
+  annualized-return hurdle so slow-resolving edges are not funded like fast ones.
 - A chronological, fee/slippage-aware backtester with Brier score and drawdown reporting.
 - An optional C++ risk kernel with a stable C ABI and Python fallback.
 - Structured JSON logs and tests around the dangerous boundaries.
@@ -85,9 +87,27 @@ Each polling cycle, per market:
    `strategy.exit_edge_bps`, sell up to `risk.max_contracts_per_order` of it. Nothing else
    happens this cycle.
 4. Entry check: pick the side whose entry price (taker: ask, maker: bid + improvement) sits below
-   fair value by `strategy.min_edge_bps` after fees. Buy only the difference between the target
-   count and what is already held. Never open a side while the opposite side is held.
+   fair value by `strategy.min_edge_bps` after fees. Size it (below), then buy only the difference
+   between the target and what is already held. Never open a side while the opposite is held.
 5. Risk checks, journal, submit.
+
+## Position sizing
+
+The target for a side at effective price `c` (limit plus per-contract fee) and fair probability
+`q` is fractional Kelly:
+
+```text
+f* = (q - c) / (1 - c)                       full Kelly fraction of bankroll
+f  = min(f* * kelly_fraction, max_bankroll_fraction)
+contracts = floor(f * balance / c)
+```
+
+then capped by `risk.max_contracts_per_order`, `risk.max_order_notional_cents`, and the remaining
+room under `risk.max_market_exposure_cents`. Expected return `(q - c) / c` is annualized over the
+market's time to close (or `sizing.default_days_to_resolution`) and compared with
+`sizing.min_annualized_return`; an edge that clears the bps threshold but ties up capital for
+months at a low annual rate is skipped. The backtester uses the same math against its running
+balance, so its position sizes match what the engine would do.
 
 Sells bypass exposure, balance, and cooldown limits because they release exposure; they are still
 blocked by the kill switch, closed markets, oversized counts, and are sent `reduce_only`.

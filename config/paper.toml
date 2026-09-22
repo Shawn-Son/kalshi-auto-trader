@@ -76,3 +76,15 @@ market_weight = 0.0
 # calibration_path = "data/calibration.json"
 orderbook_depth = 1
 max_markets = 200
+
+[sizing]
+# Fraction of full Kelly to stake. Full Kelly assumes the model is exactly
+# right; a quarter is a common compromise between growth and drawdown.
+kelly_fraction = 0.25
+# Hard cap on one market as a fraction of bankroll, whatever Kelly says.
+max_bankroll_fraction = 0.05
+# Skip edges whose expected return, annualized over time to close, is below
+# this. 0 disables the hurdle. 0.5 means "at least 50% per year".
+min_annualized_return = 0.0
+# Used when a market has no close time.
+default_days_to_resolution = 7.0
