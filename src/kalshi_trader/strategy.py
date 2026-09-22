@@ -56,7 +56,7 @@ class ProbabilityMispricingStrategy:
         held = position or Position.flat(quote.ticker)
         if signal.ticker != quote.ticker:
             return StrategyDecision(None, "signal/quote ticker mismatch")
-        if quote.status != "open":
+        if not quote.is_open:
             return StrategyDecision(None, f"market status is {quote.status}")
         if signal.age_seconds(quote.observed_at) > self.config.max_signal_age_seconds:
             return StrategyDecision(None, "signal is stale")

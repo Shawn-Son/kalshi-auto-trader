@@ -8,6 +8,10 @@ from enum import StrEnum
 ONE = Decimal("1")
 CENT = Decimal("0.01")
 
+# Kalshi reports an open market as "active" on the REST API and "open" in some
+# older payloads and docs. Either one is tradable.
+TRADABLE_STATUSES = frozenset({"open", "active"})
+
 
 class Outcome(StrEnum):
     YES = "yes"
@@ -79,6 +83,17 @@ class MarketQuote:
     no_ask_size: Decimal
     observed_at: datetime
     status: str = "open"
+    close_time: datetime | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in TRADABLE_STATUSES
+
+    def seconds_to_close(self, now: datetime | None = None) -> float | None:
+        if self.close_time is None:
+            return None
+        current = now or datetime.now(UTC)
+        return (self.close_time - current).total_seconds()
 
     def ask(self, outcome: Outcome) -> Decimal:
         return self.yes_ask if outcome is Outcome.YES else self.no_ask

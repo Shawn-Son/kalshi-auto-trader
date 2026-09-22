@@ -7,6 +7,7 @@ import pytest
 
 from kalshi_trader.config import (
     AppConfig,
+    CollectorConfig,
     FeeConfig,
     PaperConfig,
     RiskConfig,
@@ -51,6 +52,14 @@ def app_config(tmp_path) -> AppConfig:
         ),
         paper=PaperConfig(starting_balance_cents=10_000, slippage_cents=1),
         fees=FeeConfig(taker_rate=Decimal("0.07"), maker_rate=Decimal("0")),
+        collector=CollectorConfig(
+            database_path=tmp_path / "history.db",
+            series=(),
+            interval_seconds=60.0,
+            orderbook_depth=3,
+            max_markets=50,
+            concurrency=2,
+        ),
     )
 
 

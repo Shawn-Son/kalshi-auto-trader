@@ -70,7 +70,7 @@ class RiskEngine:
             return RiskDecision(False, code, reason)
         checks: tuple[tuple[bool, str, str], ...] = (
             (not kill_switch, "KILL_SWITCH", "kill switch is active"),
-            (quote.status == "open", "MARKET_CLOSED", f"market status is {quote.status}"),
+            (quote.is_open, "MARKET_CLOSED", f"market status is {quote.status}"),
             (
                 portfolio.daily_pnl_cents > -self.risk.max_daily_loss_cents,
                 "DAILY_LOSS",
@@ -117,7 +117,7 @@ class RiskEngine:
         """
         checks: tuple[tuple[bool, str, str], ...] = (
             (not kill_switch, "KILL_SWITCH", "kill switch is active"),
-            (quote.status == "open", "MARKET_CLOSED", f"market status is {quote.status}"),
+            (quote.is_open, "MARKET_CLOSED", f"market status is {quote.status}"),
             (
                 0 < intent.count <= self.risk.max_contracts_per_order,
                 "ORDER_COUNT",

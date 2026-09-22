@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -21,6 +22,7 @@ from kalshi_trader.domain import (
     Position,
     dollars_to_cents_up,
     format_dollars,
+    parse_utc,
 )
 from kalshi_trader.state import StateStore
 
@@ -96,35 +98,64 @@ class KalshiClient:
             await asyncio.sleep(delay)
         raise KalshiAPIError(f"request failed after retries: {last_error}") from last_error
 
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        payload = await self._request("GET", f"/markets/{ticker}", authenticated=False)
+        market = payload.get("market")
+        if not isinstance(market, dict):
+            raise KalshiAPIError("market response is malformed")
+        return market
+
+    async def get_orderbook(self, ticker: str, *, depth: int = 1) -> OrderBook:
+        payload = await self._request(
+            "GET", f"/markets/{ticker}/orderbook", authenticated=False, params={"depth": depth}
+        )
+        orderbook = payload.get("orderbook_fp")
+        if not isinstance(orderbook, dict):
+            raise KalshiAPIError("orderbook response is malformed")
+        return OrderBook(
+            yes_bids=_levels(orderbook.get("yes_dollars")),
+            no_bids=_levels(orderbook.get("no_dollars")),
+        )
+
+    async def list_markets(
+        self,
+        *,
+        series_ticker: str | None = None,
+        event_ticker: str | None = None,
+        status: str | None = "open",
+        max_markets: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Page through /markets. `status` follows the API: open, closed, settled, or None."""
+        markets: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while len(markets) < max_markets:
+            params: dict[str, str | int | float | bool | None] = {
+                "limit": min(200, max_markets - len(markets)),
+                "series_ticker": series_ticker,
+                "event_ticker": event_ticker,
+                "status": status,
+                "cursor": cursor,
+            }
+            payload = await self._request(
+                "GET",
+                "/markets",
+                authenticated=False,
+                params={k: v for k, v in params.items() if v is not None},
+            )
+            page = payload.get("markets", [])
+            if not isinstance(page, list):
+                raise KalshiAPIError("markets response is malformed")
+            markets.extend(item for item in page if isinstance(item, dict))
+            cursor = payload.get("cursor") or None
+            if not cursor or not page:
+                break
+        return markets[:max_markets]
+
     async def get_quote(self, ticker: str) -> MarketQuote:
-        market_task = self._request("GET", f"/markets/{ticker}", authenticated=False)
-        book_task = self._request(
-            "GET", f"/markets/{ticker}/orderbook", authenticated=False, params={"depth": 1}
+        market, book = await asyncio.gather(
+            self.get_market(ticker), self.get_orderbook(ticker, depth=1)
         )
-        market_payload, book_payload = await asyncio.gather(market_task, book_task)
-        market = market_payload.get("market")
-        orderbook = book_payload.get("orderbook_fp")
-        if not isinstance(market, dict) or not isinstance(orderbook, dict):
-            raise KalshiAPIError("market or orderbook response is malformed")
-        yes_levels = _levels(orderbook.get("yes_dollars"))
-        no_levels = _levels(orderbook.get("no_dollars"))
-        if not yes_levels or not no_levels:
-            raise KalshiAPIError(f"{ticker} does not have a two-sided orderbook")
-        yes_bid, yes_bid_size = max(yes_levels, key=lambda item: item[0])
-        no_bid, no_bid_size = max(no_levels, key=lambda item: item[0])
-        return MarketQuote(
-            ticker=ticker,
-            yes_bid=yes_bid,
-            yes_ask=ONE - no_bid,
-            no_bid=no_bid,
-            no_ask=ONE - yes_bid,
-            yes_bid_size=yes_bid_size,
-            yes_ask_size=no_bid_size,
-            no_bid_size=no_bid_size,
-            no_ask_size=yes_bid_size,
-            observed_at=datetime.now(UTC),
-            status=str(market.get("status", "unknown")),
-        )
+        return quote_from_book(ticker, market, book)
 
     async def place_order(self, intent: OrderIntent) -> OrderResult:
         book_side, price = intent.api_book_side_and_price()
@@ -253,6 +284,45 @@ class KalshiClient:
             daily_pnl_cents=state.daily_pnl(equity_cents),
             observed_at=datetime.now(UTC),
         )
+
+
+@dataclass(frozen=True)
+class OrderBook:
+    """Kalshi publishes two bid ladders; asks are the complement of the other side's bids."""
+
+    yes_bids: list[tuple[Decimal, Decimal]]
+    no_bids: list[tuple[Decimal, Decimal]]
+
+    @property
+    def two_sided(self) -> bool:
+        return bool(self.yes_bids) and bool(self.no_bids)
+
+    def best(self, side: str) -> tuple[Decimal, Decimal]:
+        levels = self.yes_bids if side == "yes" else self.no_bids
+        return max(levels, key=lambda item: item[0])
+
+
+def quote_from_book(ticker: str, market: dict[str, Any], book: OrderBook) -> MarketQuote:
+    if not book.two_sided:
+        raise KalshiAPIError(f"{ticker} does not have a two-sided orderbook")
+    yes_bid, yes_bid_size = book.best("yes")
+    no_bid, no_bid_size = book.best("no")
+    close_raw = market.get("close_time")
+    close_time = parse_utc(str(close_raw)) if isinstance(close_raw, str) and close_raw else None
+    return MarketQuote(
+        ticker=ticker,
+        yes_bid=yes_bid,
+        yes_ask=ONE - no_bid,
+        no_bid=no_bid,
+        no_ask=ONE - yes_bid,
+        yes_bid_size=yes_bid_size,
+        yes_ask_size=no_bid_size,
+        no_bid_size=no_bid_size,
+        no_ask_size=yes_bid_size,
+        observed_at=datetime.now(UTC),
+        status=str(market.get("status", "unknown")),
+        close_time=close_time,
+    )
 
 
 def _error_message(response: httpx.Response) -> str:

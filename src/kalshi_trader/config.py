@@ -75,6 +75,16 @@ class PaperConfig:
 
 
 @dataclass(frozen=True)
+class CollectorConfig:
+    database_path: Path
+    series: tuple[str, ...]
+    interval_seconds: float
+    orderbook_depth: int
+    max_markets: int
+    concurrency: int
+
+
+@dataclass(frozen=True)
 class Credentials:
     api_key_id: str
     private_key_path: Path
@@ -88,6 +98,7 @@ class AppConfig:
     risk: RiskConfig
     paper: PaperConfig
     fees: FeeConfig
+    collector: CollectorConfig
 
     @property
     def rest_url(self) -> str:
@@ -178,6 +189,8 @@ def load_config(path: Path) -> AppConfig:
     risk = _table(raw, "risk")
     paper = _table(raw, "paper")
     fees = _table(raw, "fees")
+    collector_raw = raw.get("collector")
+    collector = cast(dict[str, object], collector_raw) if isinstance(collector_raw, dict) else {}
 
     environment = _required(rt, "environment", str)
     if environment not in {"paper", "demo", "live"}:
@@ -224,6 +237,18 @@ def load_config(path: Path) -> AppConfig:
         taker_rate=Decimal(str(_number(fees, "taker_rate"))),
         maker_rate=Decimal(str(_number(fees, "maker_rate"))),
     )
+    collector_config = CollectorConfig(
+        database_path=Path(str(collector.get("database_path", "data/history.db"))),
+        series=_strings(collector, "series") if "series" in collector else (),
+        interval_seconds=(
+            _number(collector, "interval_seconds") if "interval_seconds" in collector else 60.0
+        ),
+        orderbook_depth=(
+            _integer(collector, "orderbook_depth") if "orderbook_depth" in collector else 5
+        ),
+        max_markets=_integer(collector, "max_markets") if "max_markets" in collector else 200,
+        concurrency=_integer(collector, "concurrency") if "concurrency" in collector else 4,
+    )
 
     for name, value in (
         ("runtime.poll_interval_seconds", runtime.poll_interval_seconds),
@@ -237,6 +262,10 @@ def load_config(path: Path) -> AppConfig:
         ("risk.max_open_orders", risk_config.max_open_orders),
         ("risk.min_balance_cents", risk_config.min_balance_cents),
         ("paper.starting_balance_cents", paper_config.starting_balance_cents),
+        ("collector.interval_seconds", collector_config.interval_seconds),
+        ("collector.orderbook_depth", collector_config.orderbook_depth),
+        ("collector.max_markets", collector_config.max_markets),
+        ("collector.concurrency", collector_config.concurrency),
     ):
         _positive(name, value)
     for name, value in (
@@ -258,4 +287,6 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError("max order notional cannot exceed max market exposure")
     if risk_config.max_market_exposure_cents > risk_config.max_total_exposure_cents:
         raise ConfigError("max market exposure cannot exceed max total exposure")
-    return AppConfig(runtime, universe, strategy, risk_config, paper_config, fee_config)
+    return AppConfig(
+        runtime, universe, strategy, risk_config, paper_config, fee_config, collector_config
+    )

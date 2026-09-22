@@ -36,3 +36,5 @@ def configure_logging(level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level.upper())
+    # One line per HTTP request drowns the decision log; keep only client warnings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

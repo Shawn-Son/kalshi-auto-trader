@@ -109,6 +109,29 @@ The probability model must be developed and validated separately. At minimum, ev
 calibration, Brier score, time leakage, regime stability, data-source latency, and whether the
 signal remains positive after actual fees and fill quality.
 
+## Collecting your own history
+
+No probability model can be validated without point-in-time market data, and Kalshi does not
+serve historical order books. The collector records them for you:
+
+```bash
+kalshi-trader collect --config config/paper.toml --series KXHIGHNY --series KXCPI
+kalshi-trader history --config config/paper.toml
+kalshi-trader export-history --config config/paper.toml --output data/history.csv
+```
+
+Every `collector.interval_seconds` it discovers the open markets in each configured series (plus
+`universe.tickers` and every ticker in the signal file), snapshots the top of book and a
+`collector.orderbook_depth`-level ladder into `collector.database_path`, records whatever the
+signal file currently says for those tickers, and re-checks markets it has seen before until they
+settle. Nothing here authenticates.
+
+`export-history` joins each snapshot with the market's eventual result and with the latest
+recorded signal at or before the observation, and writes the backtest CSV below. Pass
+`--require-signal` to keep only rows a model had actually predicted at the time, which is the only
+honest way to score a live model. Run the collector from day one; a model built on data you did
+not have at the time is leakage.
+
 ## Backtesting
 
 The dataset format is:

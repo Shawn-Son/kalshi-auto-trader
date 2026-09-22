@@ -39,3 +39,14 @@ slippage_cents = 1
 # published schedule for each series you trade.
 taker_rate = 0.07
 maker_rate = 0.0
+
+[collector]
+# Research data lives apart from the trading journal.
+database_path = "data/history.db"
+# Series to snapshot every cycle, e.g. ["KXHIGHNY", "KXCPI"]. Tickers in
+# [universe] and the signal file are always included.
+series = []
+interval_seconds = 60.0
+orderbook_depth = 5
+max_markets = 200
+concurrency = 4

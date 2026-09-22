@@ -5,14 +5,17 @@ import asyncio
 import json
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from kalshi_trader.api import KalshiClient
 from kalshi_trader.auth import RequestSigner
 from kalshi_trader.backtest import BacktestError, load_backtest_rows, run_backtest
 from kalshi_trader.broker import KalshiBroker, PaperBroker
+from kalshi_trader.collector import Collector, export_history
 from kalshi_trader.config import AppConfig, ConfigError, load_config
 from kalshi_trader.engine import TradingEngine
+from kalshi_trader.history import HistoryStore
 from kalshi_trader.logging import configure_logging
 from kalshi_trader.signals import SignalError, load_signals
 from kalshi_trader.state import StateStore
@@ -42,6 +45,29 @@ def _parser() -> argparse.ArgumentParser:
     backtest.add_argument("dataset", type=Path)
     backtest.add_argument("--config", type=Path, default=Path("config/paper.toml"))
     backtest.add_argument("--output", type=Path)
+    collect = subcommands.add_parser(
+        "collect", help="snapshot public order books and settlement results into history.db"
+    )
+    collect.add_argument("--config", type=Path, default=Path("config/paper.toml"))
+    collect.add_argument("--once", action="store_true", help="run one collection cycle")
+    collect.add_argument(
+        "--series", action="append", default=[], help="extra series ticker (repeatable)"
+    )
+    export = subcommands.add_parser(
+        "export-history", help="write collected snapshots as a backtest CSV"
+    )
+    export.add_argument("--config", type=Path, default=Path("config/paper.toml"))
+    export.add_argument("--output", type=Path, default=Path("data/history.csv"))
+    export.add_argument(
+        "--require-signal",
+        action="store_true",
+        help="only rows that had a recorded fair_probability at observation time",
+    )
+    export.add_argument(
+        "--include-unresolved", action="store_true", help="also export markets with no result yet"
+    )
+    history = subcommands.add_parser("history", help="summarize the collected history database")
+    history.add_argument("--config", type=Path, default=Path("config/paper.toml"))
     return parser
 
 
@@ -51,6 +77,25 @@ def _broker(config: AppConfig, state: StateStore) -> PaperBroker | KalshiBroker:
     credentials = config.credentials()
     signer = RequestSigner(credentials.api_key_id, credentials.private_key_path)
     return KalshiBroker(KalshiClient(config.rest_url, signer=signer), state)
+
+
+async def _collect(config: AppConfig, *, once: bool, extra_series: list[str]) -> None:
+    store = HistoryStore(config.collector.database_path)
+    series = tuple(dict.fromkeys((*config.collector.series, *extra_series)))
+    collector = Collector(
+        KalshiClient(config.rest_url),
+        store,
+        replace(config.collector, series=series),
+        tickers=config.universe.tickers,
+        signal_path=config.runtime.signal_path,
+    )
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signal_name, collector.stop)
+    try:
+        await collector.run(once=once)
+    finally:
+        store.close()
 
 
 async def _run(config: AppConfig, state: StateStore, *, once: bool) -> None:
@@ -93,6 +138,29 @@ def main(argv: list[str] | None = None) -> None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(rendered + "\n", encoding="utf-8")
             print(rendered)
+            return
+        if args.command == "collect":
+            asyncio.run(_collect(config, once=args.once, extra_series=args.series))
+            return
+        if args.command == "export-history":
+            store = HistoryStore(config.collector.database_path)
+            try:
+                written = export_history(
+                    store,
+                    args.output,
+                    require_signal=args.require_signal,
+                    resolved_only=not args.include_unresolved,
+                )
+            finally:
+                store.close()
+            print(json.dumps({"output": str(args.output), "rows": written}, indent=2))
+            return
+        if args.command == "history":
+            store = HistoryStore(config.collector.database_path)
+            try:
+                print(json.dumps(store.summary(), indent=2, sort_keys=True))
+            finally:
+                store.close()
             return
         state = StateStore(config.runtime.database_path)
         try:
