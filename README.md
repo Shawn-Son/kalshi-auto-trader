@@ -132,6 +132,44 @@ recorded signal at or before the observation, and writes the backtest CSV below.
 honest way to score a live model. Run the collector from day one; a model built on data you did
 not have at the time is leakage.
 
+## Producing a signal
+
+`kalshi-trader signal` runs a small ensemble over live markets and writes the signal CSV the
+engine reads. It is a starting point, not an edge.
+
+```bash
+kalshi-trader signal --config config/paper.toml --series KXHIGHNY --dry-run
+kalshi-trader signal --config config/paper.toml --series KXHIGHNY --external signals/my_odds.csv
+```
+
+Members, blended in log-odds space with the weights in `[model]`:
+
+- **Structural** (`structural_weight`): uses only the book's internal consistency. Markets in an
+  event Kalshi flags as mutually exclusive must sum to one, so their mids are normalized; threshold
+  ladders (`greater`/`less` strikes) must be monotone, so they are fitted by isotonic regression.
+  These gaps are real but small and close fast; they mostly need maker execution to survive fees.
+- **External** (`external_weight`, `--external`): a CSV of probabilities or decimal odds from a
+  source you trust (see `signals/external.example.csv`). Rows sharing a `group` are de-vigged with
+  the power method, then shrunk toward the market mid by `shrink_to_source`. This is where a real
+  edge usually comes from: weather forecast distributions, bookmaker lines, consensus surveys.
+- **Market prior** (`market_weight`): extra weight on the mid, the standard shrinkage prior.
+- **Calibration** (`calibration_path`): a Platt map `sigmoid(a·logit(p) + b)` fitted from history.
+
+## Scoring a model
+
+Once the collector has resolved markets that carried a recorded signal, score it:
+
+```bash
+kalshi-trader export-history --config config/paper.toml --require-signal --output data/scored.csv
+kalshi-trader evaluate data/scored.csv --fit-calibration data/calibration.json
+```
+
+The report gives Brier and log loss for the model and for the market mid (the bar to beat), a skill
+score, ten calibration bins with expected calibration error, and mean KL divergence from the market.
+KL is a disagreement gauge, not an accuracy gauge: small KL with better Brier is a model finding real,
+small edges; large KL with worse Brier is noise. Do not trust a Platt fit on fewer than a few hundred
+resolved markets.
+
 ## Backtesting
 
 The dataset format is:

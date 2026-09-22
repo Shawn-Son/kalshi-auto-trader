@@ -85,6 +85,21 @@ class CollectorConfig:
 
 
 @dataclass(frozen=True)
+class ModelConfig:
+    """How `kalshi-trader signal` assembles the fair-probability ensemble."""
+
+    series: tuple[str, ...]
+    structural_weight: float
+    external_weight: float
+    external_input: Path | None
+    shrink_to_source: float
+    market_weight: float
+    calibration_path: Path | None
+    orderbook_depth: int
+    max_markets: int
+
+
+@dataclass(frozen=True)
 class Credentials:
     api_key_id: str
     private_key_path: Path
@@ -99,6 +114,7 @@ class AppConfig:
     paper: PaperConfig
     fees: FeeConfig
     collector: CollectorConfig
+    model: ModelConfig
 
     @property
     def rest_url(self) -> str:
@@ -191,6 +207,8 @@ def load_config(path: Path) -> AppConfig:
     fees = _table(raw, "fees")
     collector_raw = raw.get("collector")
     collector = cast(dict[str, object], collector_raw) if isinstance(collector_raw, dict) else {}
+    model_raw = raw.get("model")
+    model = cast(dict[str, object], model_raw) if isinstance(model_raw, dict) else {}
 
     environment = _required(rt, "environment", str)
     if environment not in {"paper", "demo", "live"}:
@@ -250,6 +268,22 @@ def load_config(path: Path) -> AppConfig:
         concurrency=_integer(collector, "concurrency") if "concurrency" in collector else 4,
     )
 
+    model_config = ModelConfig(
+        series=_strings(model, "series") if "series" in model else (),
+        structural_weight=_number(model, "structural_weight")
+        if "structural_weight" in model
+        else 1.0,
+        external_weight=_number(model, "external_weight") if "external_weight" in model else 0.0,
+        external_input=Path(str(model["external_input"])) if model.get("external_input") else None,
+        shrink_to_source=_number(model, "shrink_to_source") if "shrink_to_source" in model else 0.7,
+        market_weight=_number(model, "market_weight") if "market_weight" in model else 0.0,
+        calibration_path=(
+            Path(str(model["calibration_path"])) if model.get("calibration_path") else None
+        ),
+        orderbook_depth=_integer(model, "orderbook_depth") if "orderbook_depth" in model else 1,
+        max_markets=_integer(model, "max_markets") if "max_markets" in model else 200,
+    )
+
     for name, value in (
         ("runtime.poll_interval_seconds", runtime.poll_interval_seconds),
         ("strategy.min_edge_bps", strategy.min_edge_bps),
@@ -277,8 +311,13 @@ def load_config(path: Path) -> AppConfig:
         ("paper.slippage_cents", paper_config.slippage_cents),
         ("fees.taker_rate", float(fee_config.taker_rate)),
         ("fees.maker_rate", float(fee_config.maker_rate)),
+        ("model.structural_weight", model_config.structural_weight),
+        ("model.external_weight", model_config.external_weight),
+        ("model.market_weight", model_config.market_weight),
     ):
         _positive(name, value, zero_ok=True)
+    if not 0 < model_config.shrink_to_source <= 1:
+        raise ConfigError("model.shrink_to_source must be in (0, 1]")
     if fee_config.taker_rate >= 1 or fee_config.maker_rate >= 1:
         raise ConfigError("fee rates are fractions of notional and must be below 1")
     if not 0 < strategy.min_probability < strategy.max_probability < 1:
@@ -288,5 +327,12 @@ def load_config(path: Path) -> AppConfig:
     if risk_config.max_market_exposure_cents > risk_config.max_total_exposure_cents:
         raise ConfigError("max market exposure cannot exceed max total exposure")
     return AppConfig(
-        runtime, universe, strategy, risk_config, paper_config, fee_config, collector_config
+        runtime,
+        universe,
+        strategy,
+        risk_config,
+        paper_config,
+        fee_config,
+        collector_config,
+        model_config,
     )

@@ -9,6 +9,7 @@ from kalshi_trader.config import (
     AppConfig,
     CollectorConfig,
     FeeConfig,
+    ModelConfig,
     PaperConfig,
     RiskConfig,
     RuntimeConfig,
@@ -59,6 +60,17 @@ def app_config(tmp_path) -> AppConfig:
             orderbook_depth=3,
             max_markets=50,
             concurrency=2,
+        ),
+        model=ModelConfig(
+            series=(),
+            structural_weight=1.0,
+            external_weight=0.0,
+            external_input=None,
+            shrink_to_source=0.7,
+            market_weight=0.0,
+            calibration_path=None,
+            orderbook_depth=1,
+            max_markets=50,
         ),
     )
 

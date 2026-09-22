@@ -151,6 +151,14 @@ class KalshiClient:
                 break
         return markets[:max_markets]
 
+    async def event_is_mutually_exclusive(self, event_ticker: str) -> bool:
+        try:
+            payload = await self._request("GET", f"/events/{event_ticker}", authenticated=False)
+        except KalshiAPIError:
+            return False
+        event = payload.get("event")
+        return isinstance(event, dict) and bool(event.get("mutually_exclusive"))
+
     async def get_quote(self, ticker: str) -> MarketQuote:
         market, book = await asyncio.gather(
             self.get_market(ticker), self.get_orderbook(ticker, depth=1)

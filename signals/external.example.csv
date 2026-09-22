@@ -1,0 +1,10 @@
+ticker,probability,group,weight
+# One row per market. Either `probability` or `decimal_odds`. Rows sharing a
+# `group` are mutually exclusive and get de-vigged together. `weight` in (0,1]
+# is your confidence in that row; the model shrinks toward the market mid.
+KXHIGHNY-26SEP23-B65.5,0.22,ny-sep23,1.0
+KXHIGHNY-26SEP23-B67.5,0.55,ny-sep23,1.0
+KXHIGHNY-26SEP23-B69.5,0.14,ny-sep23,1.0
+KXHIGHNY-26SEP23-B71.5,0.03,ny-sep23,1.0
+KXHIGHNY-26SEP23-T65,0.06,ny-sep23,1.0
+KXHIGHNY-26SEP23-T72,0.02,ny-sep23,1.0

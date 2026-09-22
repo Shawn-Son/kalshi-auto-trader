@@ -50,3 +50,22 @@ interval_seconds = 60.0
 orderbook_depth = 5
 max_markets = 200
 concurrency = 4
+
+[model]
+# `kalshi-trader signal` scores these series (plus [universe] tickers) and
+# writes runtime.signal_path. Weights blend members in log-odds space.
+series = []
+# Structural: exclusivity + monotone-ladder consistency of the book itself.
+structural_weight = 1.0
+# External: a CSV of probabilities or decimal odds from a source you trust
+# (forecast distribution, bookmaker line, consensus). 0 disables it.
+external_weight = 0.0
+# external_input = "signals/external.csv"
+# How much to trust the external source versus the market mid (1 = fully).
+shrink_to_source = 0.7
+# Extra weight on the market mid in the final blend (shrinkage prior).
+market_weight = 0.0
+# Platt parameters from `kalshi-trader evaluate --fit-calibration`.
+# calibration_path = "data/calibration.json"
+orderbook_depth = 1
+max_markets = 200
